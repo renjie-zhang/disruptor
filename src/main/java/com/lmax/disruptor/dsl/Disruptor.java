@@ -29,21 +29,19 @@ import com.lmax.disruptor.Sequence;
 import com.lmax.disruptor.SequenceBarrier;
 import com.lmax.disruptor.TimeoutException;
 import com.lmax.disruptor.WaitStrategy;
-import com.lmax.disruptor.WorkHandler;
-import com.lmax.disruptor.WorkerPool;
 import com.lmax.disruptor.util.Util;
 
-import java.util.concurrent.Executor;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * <p>A DSL-style API for setting up the disruptor pattern around a ring buffer
- * (aka the Builder pattern).</p>
+ * A DSL-style API for setting up the disruptor pattern around a ring buffer
+ * (aka the Builder pattern).
  *
  * <p>A simple example of setting up the disruptor with two event handlers that
- * must process events in order:</p>
+ * must process events in order:
+ *
  * <pre>
  * <code>Disruptor&lt;MyEvent&gt; disruptor = new Disruptor&lt;MyEvent&gt;(MyEvent.FACTORY, 32, Executors.newCachedThreadPool());
  * EventHandler&lt;MyEvent&gt; handler1 = new EventHandler&lt;MyEvent&gt;() { ... };
@@ -59,50 +57,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class Disruptor<T>
 {
     private final RingBuffer<T> ringBuffer;
-    private final Executor executor;
+    private final ThreadFactory threadFactory;
     private final ConsumerRepository<T> consumerRepository = new ConsumerRepository<>();
     private final AtomicBoolean started = new AtomicBoolean(false);
     private ExceptionHandler<? super T> exceptionHandler = new ExceptionHandlerWrapper<>();
-
-    /**
-     * Create a new Disruptor. Will default to {@link com.lmax.disruptor.BlockingWaitStrategy} and
-     * {@link ProducerType}.MULTI
-     *
-     * @deprecated Use a {@link ThreadFactory} instead of an {@link Executor} as a the ThreadFactory
-     * is able to report errors when it is unable to construct a thread to run a producer.
-     *
-     * @param eventFactory   the factory to create events in the ring buffer.
-     * @param ringBufferSize the size of the ring buffer.
-     * @param executor       an {@link Executor} to execute event processors.
-     */
-    @Deprecated
-    public Disruptor(final EventFactory<T> eventFactory, final int ringBufferSize, final Executor executor)
-    {
-        this(RingBuffer.createMultiProducer(eventFactory, ringBufferSize), executor);
-    }
-
-    /**
-     * Create a new Disruptor.
-     *
-     * @deprecated Use a {@link ThreadFactory} instead of an {@link Executor} as a the ThreadFactory
-     * is able to report errors when it is unable to construct a thread to run a producer.
-     *
-     * @param eventFactory   the factory to create events in the ring buffer.
-     * @param ringBufferSize the size of the ring buffer, must be power of 2.
-     * @param executor       an {@link Executor} to execute event processors.
-     * @param producerType   the claim strategy to use for the ring buffer.
-     * @param waitStrategy   the wait strategy to use for the ring buffer.
-     */
-    @Deprecated
-    public Disruptor(
-        final EventFactory<T> eventFactory,
-        final int ringBufferSize,
-        final Executor executor,
-        final ProducerType producerType,
-        final WaitStrategy waitStrategy)
-    {
-        this(RingBuffer.create(producerType, eventFactory, ringBufferSize, waitStrategy), executor);
-    }
 
     /**
      * Create a new Disruptor. Will default to {@link com.lmax.disruptor.BlockingWaitStrategy} and
@@ -114,7 +72,7 @@ public class Disruptor<T>
      */
     public Disruptor(final EventFactory<T> eventFactory, final int ringBufferSize, final ThreadFactory threadFactory)
     {
-        this(RingBuffer.createMultiProducer(eventFactory, ringBufferSize), new BasicExecutor(threadFactory));
+        this(RingBuffer.createMultiProducer(eventFactory, ringBufferSize), threadFactory);
     }
 
     /**
@@ -135,16 +93,16 @@ public class Disruptor<T>
     {
         this(
             RingBuffer.create(producerType, eventFactory, ringBufferSize, waitStrategy),
-            new BasicExecutor(threadFactory));
+            threadFactory);
     }
 
     /**
      * Private constructor helper
      */
-    private Disruptor(final RingBuffer<T> ringBuffer, final Executor executor)
+    private Disruptor(final RingBuffer<T> ringBuffer, final ThreadFactory threadFactory)
     {
         this.ringBuffer = ringBuffer;
-        this.executor = executor;
+        this.threadFactory = threadFactory;
     }
 
     /**
@@ -223,21 +181,6 @@ public class Disruptor<T>
 
 
     /**
-     * Set up a {@link WorkerPool} to distribute an event to one of a pool of work handler threads.
-     * Each event will only be processed by one of the work handlers.
-     * The Disruptor will automatically start this processors when {@link #start()} is called.
-     *
-     * @param workHandlers the work handlers that will process events.
-     * @return a {@link EventHandlerGroup} that can be used to chain dependencies.
-     */
-    @SafeVarargs
-    @SuppressWarnings("varargs")
-    public final EventHandlerGroup<T> handleEventsWithWorkerPool(final WorkHandler<T>... workHandlers)
-    {
-        return createWorkerPool(new Sequence[0], workHandlers);
-    }
-
-    /**
      * <p>Specify an exception handler to be used for any future event handlers.</p>
      *
      * <p>Note that only event handlers set up after calling this method will use the exception handler.</p>
@@ -245,6 +188,7 @@ public class Disruptor<T>
      * @param exceptionHandler the exception handler to use for any future {@link EventProcessor}.
      * @deprecated This method only applies to future event handlers. Use setDefaultExceptionHandler instead which applies to existing and new event handlers.
      */
+    @Deprecated
     public void handleExceptionsWith(final ExceptionHandler<? super T> exceptionHandler)
     {
         this.exceptionHandler = exceptionHandler;
@@ -265,7 +209,7 @@ public class Disruptor<T>
         {
             throw new IllegalStateException("setDefaultExceptionHandler can not be used after handleExceptionsWith");
         }
-        ((ExceptionHandlerWrapper<T>)this.exceptionHandler).switchTo(exceptionHandler);
+        ((ExceptionHandlerWrapper<T>) this.exceptionHandler).switchTo(exceptionHandler);
     }
 
     /**
@@ -395,7 +339,7 @@ public class Disruptor<T>
         checkOnlyStartedOnce();
         for (final ConsumerInfo consumerInfo : consumerRepository)
         {
-            consumerInfo.start(executor);
+            consumerInfo.start(threadFactory);
         }
 
         return ringBuffer;
@@ -534,6 +478,16 @@ public class Disruptor<T>
         return consumerRepository.hasBacklog(cursor, false);
     }
 
+    /**
+     * Checks if disruptor has been started
+     *
+     * @return true when start has been called on this instance; otherwise false
+     */
+    public boolean hasStarted()
+    {
+      return started.get();
+    }
+
     EventHandlerGroup<T> createEventProcessors(
         final Sequence[] barrierSequences,
         final EventHandler<? super T>[] eventHandlers)
@@ -589,22 +543,6 @@ public class Disruptor<T>
         return handleEventsWith(eventProcessors);
     }
 
-    EventHandlerGroup<T> createWorkerPool(
-        final Sequence[] barrierSequences, final WorkHandler<? super T>[] workHandlers)
-    {
-        final SequenceBarrier sequenceBarrier = ringBuffer.newBarrier(barrierSequences);
-        final WorkerPool<T> workerPool = new WorkerPool<>(ringBuffer, sequenceBarrier, exceptionHandler, workHandlers);
-
-
-        consumerRepository.add(workerPool, sequenceBarrier);
-
-        final Sequence[] workerSequences = workerPool.getWorkerSequences();
-
-        updateGatingSequencesForNextInChain(barrierSequences, workerSequences);
-
-        return new EventHandlerGroup<>(this, consumerRepository, workerSequences);
-    }
-
     private void checkNotStarted()
     {
         if (started.get())
@@ -627,7 +565,7 @@ public class Disruptor<T>
         return "Disruptor{" +
             "ringBuffer=" + ringBuffer +
             ", started=" + started +
-            ", executor=" + executor +
+            ", threadFactory=" + threadFactory +
             '}';
     }
 }
